@@ -68,7 +68,20 @@ def create_simulated_imu_csv(csv_file_path, overwrite: bool = True, body_seg_df=
     # simulate imus for all segments
     all_segments = config.IMU_POS_OFFSETS_BC.keys()
     for body_seg in all_segments:
+        # A segment present in one and missing from the other is a config error.
+        if body_seg not in config.IMU_ROT_OFFSETS_BC:
+            raise KeyError(
+                f"{body_seg} has an entry in IMU_POS_OFFSETS_BC but none in "
+                f"IMU_ROT_OFFSETS_BC; both dicts must cover the same segments"
+            )
+
         p_offset_bc = config.IMU_POS_OFFSETS_BC[body_seg]
+
+        # Constant body->sensor mounting rotation R_BC; exactly identity for a zero offset
+        r_offset_bc = mops.rotmat_from_sensor_offset_bc(
+            a_xyz=config.IMU_ROT_OFFSETS_BC[body_seg],
+            input_in_degrees=True
+        )
 
         # Body-origin trajectory in ground: the point the offsets above are measured from
         orig_pos_cols = utility.require_position_columns(body_seg_df.columns, body_seg)
@@ -80,17 +93,27 @@ def create_simulated_imu_csv(csv_file_path, overwrite: bool = True, body_seg_df=
             [f"{body_seg}_Ox_rot", f"{body_seg}_Oy_rot", f"{body_seg}_Oz_rot"]
         ].to_numpy(dtype=np.float32)
 
+        # Body orientation in 'YZX', the parametrisation the gyro/accel helpers rebuild
+        # R_GB from. Kept free of the mounting offset: those two apply R_BC themselves
         ypr_angles = mops.compute_angle_from_body_euler_xyz(
             a_xyz=ang,
             input_in_degrees=True
         )
-        angle_print_order = np.hstack([ypr_angles[:, np.newaxis, -1], ypr_angles[:, :2]])
+
+        # What the sensor's own axes report: R_GC = R_GB @ R_BC, re-expressed in 'YZX'
+        ypr_sensor = mops.compute_angle_from_body_euler_xyz(
+            a_xyz=ang,
+            input_in_degrees=True,
+            r_bc=r_offset_bc
+        )
+        angle_print_order = np.hstack([ypr_sensor[:, np.newaxis, -1], ypr_sensor[:, :2]])
 
         gyro_b = mops.compute_gyro_from_body_euler_xyz(
             a_gb=ypr_angles,
             dt=dts,
             input_in_degrees=False,
-            sequence='YZX'
+            sequence='YZX',
+            r_bc=r_offset_bc
         )
 
         accel_b = mops.compute_accel_from_body_pos_and_euler_xyz(
@@ -99,7 +122,8 @@ def create_simulated_imu_csv(csv_file_path, overwrite: bool = True, body_seg_df=
             dt=dts,
             p_bc=p_offset_bc,
             input_in_degrees=False,
-            sequence='YZX'
+            sequence='YZX',
+            r_bc=r_offset_bc
         )
 
         # add simulated IMUs to csv

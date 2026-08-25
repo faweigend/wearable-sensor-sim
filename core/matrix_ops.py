@@ -2,6 +2,64 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 
+def rotmat_from_sensor_offset_bc(
+        a_xyz: np.ndarray = None,
+        input_in_degrees: bool = True
+) -> np.ndarray:
+    """
+    The constant body->sensor mounting rotation R_BC from an offset triple.
+
+    Same angle convention as the OpenSim orientation columns the rest of this pipeline is
+    built on: body-fixed, intrinsic 'XYZ' (frontal, transverse, sagittal), so scipy's
+    capital 'XYZ'. config.IMU_ROT_OFFSETS_BC stores these in DEGREES, matching the
+    *_O{x,y,z}_rot columns.
+
+    R_BC maps sensor-frame vectors into the body frame, so a sensor whose case is rotated
+    by a_xyz relative to the segment it is strapped to has orientation R_GC = R_GB @ R_BC.
+
+    Parameters:
+    a_xyz : np.ndarray | None
+        (3,) mounting offset. None or all-zero returns exactly the identity, i.e. a sensor
+        aligned with the body frame -- the assumption this pipeline made before offsets
+        existed. The identity is returned bit-exact so a zero offset cannot perturb the
+        numbers.
+    input_in_degrees : bool
+        True if a_xyz is in degrees.
+
+    Returns:
+    np.ndarray  (3, 3) rotation matrix R_BC.
+    """
+    if a_xyz is None:
+        return np.eye(3)
+    a_xyz = np.asarray(a_xyz, dtype=float).reshape(3, )
+    if not a_xyz.any():
+        return np.eye(3)
+    return R.from_euler('XYZ', a_xyz, degrees=input_in_degrees).as_matrix()
+
+
+def _check_sensor_offset(r_bc: np.ndarray) -> bool:
+    """
+    Validate a body->sensor rotation and report whether it is a no-op.
+
+    Returns True when r_bc is None or exactly the identity, which lets the callers below
+    keep their original code path untouched. That is what makes a zero mounting offset
+    bit-identical to the pre-offset pipeline rather than merely equal to within 1e-15.
+
+    Raises ValueError if r_bc is not a (3, 3) rotation: a mistyped offset should fail here,
+    not silently skew a whole dataset.
+    """
+    if r_bc is None:
+        return True
+    r_bc = np.asarray(r_bc, dtype=float)
+    if r_bc.shape != (3, 3):
+        raise ValueError(f"r_bc must be a (3, 3) rotation matrix, got shape {r_bc.shape}")
+    if not np.allclose(r_bc.T @ r_bc, np.eye(3), atol=1e-8):
+        raise ValueError("r_bc is not orthonormal, so it is not a rotation matrix")
+    if not np.isclose(np.linalg.det(r_bc), 1.0, atol=1e-8):
+        raise ValueError(f"r_bc has determinant {np.linalg.det(r_bc)}, expected +1")
+    return np.array_equal(r_bc, np.eye(3))
+
+
 def batch_skew_symmetric_mat_to_ground_ang_vel(s_mat: np.ndarray) -> np.ndarray:
     """
     Extract angular velocity components from a batch of skew-symmetric matrices.
@@ -34,11 +92,15 @@ def batch_skew_symmetric_mat_to_ground_ang_vel(s_mat: np.ndarray) -> np.ndarray:
 
 def compute_angle_from_body_euler_xyz(
         a_xyz: np.ndarray,
-        input_in_degrees: bool = True
+        input_in_degrees: bool = True,
+        r_bc: np.ndarray = None
 ) -> np.ndarray:
     """
     a_xyz: Nx3 angles in radians
     input_in_degrees: set True if your angles are in degrees (common in exported IK tables)
+    r_bc: optional constant (3,3) body->sensor mounting rotation from
+          rotmat_from_sensor_offset_bc(). None or identity returns the body's own
+          orientation, as before offsets existed.
     """
     a_xyz = np.asarray(a_xyz, dtype=float)
 
@@ -48,6 +110,9 @@ def compute_angle_from_body_euler_xyz(
     # the opensim order is frontal (x), transverse (y), sagittal (z)
     # [N,3,3] array of rot mats
     r = R.from_euler('XYZ', a_xyz, degrees=False)
+    if not _check_sensor_offset(r_bc):
+        # R_GC = R_GB @ R_BC, composed while still a rotation
+        r = r * R.from_matrix(r_bc)
     ypr = r.as_euler('YZX', degrees=False)
     ypr[:, 0] = np.unwrap(ypr[:, 0])
     return ypr
@@ -101,7 +166,8 @@ def compute_gyro_from_body_euler_xyz(
         a_gb: np.ndarray,
         dt: float,
         input_in_degrees: bool = True,
-        sequence: str = 'XYZ'
+        sequence: str = 'XYZ',
+        r_bc: np.ndarray = None
 ) -> np.ndarray:
     """
     # Subject-Independent, Biological Hip Moment Estimation During Multimodal Overground Ambulation Using Deep Learning
@@ -109,14 +175,20 @@ def compute_gyro_from_body_euler_xyz(
     Paper Appendix A Eq (6)-(8):
       W = d(R_GB)/dt * R_BG
       omega_G from W, then omega_B = R_BG * omega_G
+    and with a mounting offset, Eq (8) continues into the sensor case:
+      omega_C = R_BC^T * omega_B
 
     Inputs:
       a_xyz: Nx3 array of body orientation angles (OpenSim columns *_Ox_pos, *_Oy_pos, *_Oz_pos)
       dt: timestep [s]
       degrees: set True if your angles are in degrees (common in exported IK tables)
+      r_bc: optional constant (3,3) body->sensor mounting rotation.
     Returns:
-      gyro_B: Nx3 angular velocity expressed in body frame (sensor-aligned with body) using radians
+      gyro_C: Nx3 angular velocity expressed in the sensor frame using radians. Identical to
+              the body frame when r_bc is None or identity.
     """
+    identity_offset = _check_sensor_offset(r_bc)
+
     if input_in_degrees:
         a_gb = np.deg2rad(a_gb)
 
@@ -131,9 +203,13 @@ def compute_gyro_from_body_euler_xyz(
     # Batched W = r_gb_dot * r_bg, shape (N,3,3)
     w_mat_g = r_gb_dot @ r_bg
     omega_gb = batch_skew_symmetric_mat_to_ground_ang_vel(w_mat_g)
-    omega_b = r_bg @ omega_gb[:, :, np.newaxis]
+    omega_b = (r_bg @ omega_gb[:, :, np.newaxis]).squeeze(-1)
 
-    return omega_b.squeeze()
+    if identity_offset:
+        return omega_b
+
+    # omega_C = R_BC^T omega_B: same vector, read on the sensor's own axes
+    return np.einsum('ij,nj->ni', np.asarray(r_bc, dtype=float).T, omega_b)
 
 
 def compute_accel_from_body_pos_and_euler_xyz(
@@ -143,13 +219,15 @@ def compute_accel_from_body_pos_and_euler_xyz(
         p_bc: np.ndarray,
         input_in_degrees: bool = True,
         gravity_g: np.ndarray = np.array([0.0, -9.81, 0.0]),
-        sequence: str = "XYZ"
+        sequence: str = "XYZ",
+        r_bc: np.ndarray = None
 ) -> np.ndarray:
     """
     Paper Appendix A Eq (9)-(12):
       p_GC = p_GB + R_GB * p_BC
       a_GC = d2(p_GC)/dt2 - g
-      a_C  = R_BG * a_GC   (if sensor frame aligned with body frame)
+      a_C  = R_CG * a_GC,  R_CG = (R_GB R_BC)^T = R_BC^T R_BG
+    which reduces to Eq (12)'s R_BG when the sensor frame is aligned with the body frame.
 
     Inputs:
       p_gb: Nx3 reference-point trajectory in ground. With body_segments.csv this is the
@@ -157,9 +235,12 @@ def compute_accel_from_body_pos_and_euler_xyz(
             BodyKinematics records "center of mass position and orientation" per body.
       p_bc: 3-vector offset [m] of the sensor from that reference point, in body
             coordinates. COM-relative for the same reason.
+      r_bc: optional constant (3,3) body->sensor mounting rotation.
     Returns:
-      accel_C: Nx3 specific force expressed in sensor/body frame
+      accel_C: Nx3 specific force expressed in the sensor frame. Identical to the body frame
+               when r_bc is None or identity.
     """
+    identity_offset = _check_sensor_offset(r_bc)
 
     if input_in_degrees:
         a_gb = np.deg2rad(a_gb)
@@ -184,7 +265,11 @@ def compute_accel_from_body_pos_and_euler_xyz(
     # R_BG = R_GB^T for each sample, shape (N,3,3)
     r_bg = np.transpose(r_gb, (0, 2, 1))
 
-    r_cg = r_bg  # (Eq 12)
+    if identity_offset:
+        r_cg = r_bg  # (Eq 12)
+    else:
+        # R_CG = (R_GB R_BC)^T = R_BC^T R_BG  (Eq 12 with the imu rotated on its mount)
+        r_cg = np.einsum('ij,njk->nik', np.asarray(r_bc, dtype=float).T, r_bg)
 
     # Batched a_C = R_BG @ a_spec_G, shape (N,3)
     accel_c = (r_cg @ a_gc[..., None]).squeeze(-1)

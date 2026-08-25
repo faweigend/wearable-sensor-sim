@@ -18,7 +18,10 @@ IMU_POS_OFFSETS_BC = {
     "pelvis": np.array([0.0, 0.0, 0.0])  # pelvis IMU
 }
 
-# TODO: rotation offset ignored for now
+# Sensor mounting orientation relative to the body frame, in body coordinates:
+# R_BC, applied as R_GC = R_GB @ R_BC. Body-fixed intrinsic 'xyz' Euler angles in degrees,
+# the same convention as the OpenSim *_O{x,y,z}_rot columns that drive the pipeline.
+# The default [0,0,0] means the sensor axes are aligned with the segment axes.
 IMU_ROT_OFFSETS_BC = {
     "femur_r": np.array([0.0, 0.0, 0.0]),
     "femur_l": np.array([0.0, 0.0, 0.0]),
