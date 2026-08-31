@@ -155,7 +155,7 @@ def create_simulated_insole_csv(csv_file_path, overwrite: bool = True, body_seg_
     out_file_path = out_dir / "simulated_insoles.csv"
     grf_file_path = out_dir / "grfs.csv"
 
-    # calcn body axis -> insole channel. y is superior, so it is the vertical load.
+    # calcn body axis -> insole channel. y is the vertical load in OpenSim.
     insole_force_axis_names = {0: "force_ap", 1: "force_vert", 2: "force_ml"}
     insole_cop_axis_names = {0: "cop_ap", 1: "cop_vert", 2: "cop_ml"}
 
@@ -174,7 +174,7 @@ def create_simulated_insole_csv(csv_file_path, overwrite: bool = True, body_seg_
         body_seg_df = pd.read_csv(csv_file_path, low_memory=False)
     grf_df = pd.read_csv(grf_file_path, low_memory=False)
 
-    # The two files are written by the same osim pipeline on one time base. Assert it
+    # The two files are written by the same osim pipeline on one time base. Assert the correct files were matched
     if len(body_seg_df) != len(grf_df) or not np.allclose(
             body_seg_df["std_time"].to_numpy(dtype=float),
             grf_df["std_time"].to_numpy(dtype=float)):
