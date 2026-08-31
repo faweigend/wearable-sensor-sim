@@ -19,6 +19,6 @@ Similarly, physical insole hardware typically measures scalar normal force distr
 
 Simulated IMUs are calculated from local body segment coordinate frames and the global-to-local rotations. Simulated insoles report GRFs and CoPs in respective foot frames.
 
-![coordinate frames]([http://url/to/img.png](https://raw.githubusercontent.com/faweigend/wearable-sensor-sim/refs/heads/main/httpdocs/coordinate-frames.png?token=GHSAT0AAAAAAEEUJWTWKCRYOLC2HFVZ5QJ42UVZ5IQ))
+![coordinate frames](https://raw.githubusercontent.com/faweigend/wearable-sensor-sim/refs/heads/main/httpdocs/coordinate-frames.png?token=GHSAT0AAAAAAEEUJWTWKCRYOLC2HFVZ5QJ42UVZ5IQ)
 
 
